@@ -1,7 +1,8 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import { sql } from 'kysely';
 import { config } from './config.js';
-import { pool } from './db.js';
+import { db } from './db/index.js';
 import { publisher, subscriber } from './redis.js';
 import { errorHandler } from './middleware/errors.js';
 import { productRoutes } from './routes/products.routes.js';
@@ -29,18 +30,14 @@ await app.register(reservationRoutes);
 
 // Health check
 app.get('/api/health', async () => {
-  const dbResult = await pool.query('SELECT NOW() AS now');
+  const result = await sql<{ now: string }>`SELECT NOW() AS now`.execute(db);
   const redisOk = publisher.status === 'ready' ? 'connected' : publisher.status;
 
   return {
     status: 'ok',
     instanceId: config.instanceId,
-    timestamp: dbResult.rows[0].now,
+    timestamp: result.rows[0].now,
     redis: redisOk,
-    connections: {
-      db: pool.totalCount,
-      dbIdle: pool.idleCount,
-    },
   };
 });
 
@@ -53,7 +50,7 @@ async function start() {
     console.log(`[${config.instanceId}] Redis connected`);
 
     // Verify DB
-    await pool.query('SELECT 1');
+    await sql`SELECT 1`.execute(db);
     console.log(`[${config.instanceId}] PostgreSQL connected`);
 
     // Background job: expire stale reservations every 60s
@@ -80,7 +77,7 @@ async function start() {
 const shutdown = async () => {
   console.log(`[${config.instanceId}] Shutting down...`);
   await app.close();
-  await pool.end();
+  await db.destroy();
   publisher.disconnect();
   subscriber.disconnect();
   process.exit(0);

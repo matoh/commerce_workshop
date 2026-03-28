@@ -1,132 +1,132 @@
-import { pool } from '../db.js';
+import { db } from '../db/index.js';
 import { AppError } from '../utils/errors.js';
 
 const RESERVATION_TTL_MINUTES = 15;
 
 export async function reserve(productId: number, channelId: number, quantity: number = 1) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  return await db.transaction().execute(async (trx) => {
+    // Check available stock
+    const inv = await trx
+      .selectFrom('channel_inventory')
+      .select(['allocated_stock', 'reserved_stock'])
+      .where('product_id', '=', productId)
+      .where('channel_id', '=', channelId)
+      .executeTakeFirst();
 
-    // Check available stock (allocated - reserved)
-    const inv = await client.query(
-      `SELECT allocated_stock, reserved_stock FROM channel_inventory
-       WHERE product_id = $1 AND channel_id = $2`,
-      [productId, channelId],
-    );
-
-    if (inv.rows.length === 0) {
+    if (!inv) {
       throw new AppError(404, 'Product not available in this channel');
     }
 
-    const available = inv.rows[0].allocated_stock - inv.rows[0].reserved_stock;
-    if (available < quantity) {
+    if (inv.allocated_stock - inv.reserved_stock < quantity) {
       throw new AppError(409, 'Insufficient stock for reservation');
     }
 
     // Increment reserved stock
-    await client.query(
-      `UPDATE channel_inventory SET reserved_stock = reserved_stock + $1
-       WHERE product_id = $2 AND channel_id = $3`,
-      [quantity, productId, channelId],
-    );
+    await trx
+      .updateTable('channel_inventory')
+      .set((eb) => ({
+        reserved_stock: eb('reserved_stock', '+', quantity),
+      }))
+      .where('product_id', '=', productId)
+      .where('channel_id', '=', channelId)
+      .execute();
 
     // Create reservation with TTL
     const expiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
-    const reservation = await client.query(
-      `INSERT INTO reservations (product_id, channel_id, quantity, expires_at)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [productId, channelId, quantity, expiresAt],
-    );
 
-    await client.query('COMMIT');
-    return reservation.rows[0];
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+    return await trx
+      .insertInto('reservations')
+      .values({
+        product_id: productId,
+        channel_id: channelId,
+        quantity,
+        expires_at: expiresAt,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+  });
 }
 
 export async function complete(reservationId: number) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
+  return await db.transaction().execute(async (trx) => {
+    // Mark reservation as completed
+    const reservation = await trx
+      .updateTable('reservations')
+      .set({ status: 'completed' })
+      .where('id', '=', reservationId)
+      .where('status', '=', 'held')
+      .where('expires_at', '>', new Date())
+      .returningAll()
+      .executeTakeFirst();
 
-    const res = await client.query(
-      `UPDATE reservations SET status = 'completed'
-       WHERE id = $1 AND status = 'held' AND expires_at > NOW()
-       RETURNING *`,
-      [reservationId],
-    );
-
-    if (res.rows.length === 0) {
+    if (!reservation) {
       throw new AppError(404, 'Reservation not found or expired');
     }
 
-    const reservation = res.rows[0];
-
-    // Release reserved stock
-    await client.query(
-      `UPDATE channel_inventory SET
-        reserved_stock = reserved_stock - $1,
-        allocated_stock = allocated_stock - $1
-       WHERE product_id = $2 AND channel_id = $3`,
-      [reservation.quantity, reservation.product_id, reservation.channel_id],
-    );
+    // Release reserved stock and decrement allocated stock
+    await trx
+      .updateTable('channel_inventory')
+      .set((eb) => ({
+        reserved_stock: eb('reserved_stock', '-', reservation.quantity),
+        allocated_stock: eb('allocated_stock', '-', reservation.quantity),
+      }))
+      .where('product_id', '=', reservation.product_id)
+      .where('channel_id', '=', reservation.channel_id)
+      .execute();
 
     // Decrement total product stock
-    await client.query(
-      'UPDATE products SET stock = stock - $1, updated_at = NOW() WHERE id = $2',
-      [reservation.quantity, reservation.product_id],
-    );
+    await trx
+      .updateTable('products')
+      .set((eb) => ({
+        stock: eb('stock', '-', reservation.quantity),
+        updated_at: new Date(),
+      }))
+      .where('id', '=', reservation.product_id)
+      .execute();
 
     // Get price and record sale
-    const product = await client.query('SELECT price FROM products WHERE id = $1', [reservation.product_id]);
-    const sale = await client.query(
-      `INSERT INTO sales (product_id, channel_id, quantity, unit_price)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [reservation.product_id, reservation.channel_id, reservation.quantity, product.rows[0].price],
-    );
+    const product = await trx
+      .selectFrom('products')
+      .select('price')
+      .where('id', '=', reservation.product_id)
+      .executeTakeFirstOrThrow();
 
-    await client.query('COMMIT');
-    return sale.rows[0];
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+    return await trx
+      .insertInto('sales')
+      .values({
+        product_id: reservation.product_id,
+        channel_id: reservation.channel_id,
+        quantity: reservation.quantity,
+        unit_price: product.price,
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+  });
 }
 
 export async function expireStale() {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
+  return await db.transaction().execute(async (trx) => {
     // Find and expire stale reservations
-    const expired = await client.query(
-      `UPDATE reservations SET status = 'expired'
-       WHERE status = 'held' AND expires_at <= NOW()
-       RETURNING *`,
-    );
+    const expired = await trx
+      .updateTable('reservations')
+      .set({ status: 'expired' })
+      .where('status', '=', 'held')
+      .where('expires_at', '<=', new Date())
+      .returningAll()
+      .execute();
 
     // Release reserved stock for each expired reservation
-    for (const reservation of expired.rows) {
-      await client.query(
-        `UPDATE channel_inventory SET reserved_stock = reserved_stock - $1
-         WHERE product_id = $2 AND channel_id = $3`,
-        [reservation.quantity, reservation.product_id, reservation.channel_id],
-      );
+    for (const reservation of expired) {
+      await trx
+        .updateTable('channel_inventory')
+        .set((eb) => ({
+          reserved_stock: eb('reserved_stock', '-', reservation.quantity),
+        }))
+        .where('product_id', '=', reservation.product_id)
+        .where('channel_id', '=', reservation.channel_id)
+        .execute();
     }
 
-    await client.query('COMMIT');
-    return expired.rows;
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+    return expired;
+  });
 }

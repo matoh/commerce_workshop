@@ -22,6 +22,10 @@ A mini POS backoffice for managing products and inventory across multiple sales 
 
 ```bash
 docker compose up --build
+
+# First time only — run migrations and seed data:
+docker compose exec api-1 npm run migrate
+docker compose exec api-1 npm run seed
 ```
 
 | Service       | URL                    |

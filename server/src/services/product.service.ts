@@ -1,8 +1,9 @@
-import { pool } from '../db.js';
+import { sql } from 'kysely';
+import { db } from '../db/index.js';
 import { AppError } from '../utils/errors.js';
 
 export async function listProducts() {
-  const result = await pool.query(`
+  return await sql<Record<string, unknown>>`
     SELECT
       p.*,
       json_agg(
@@ -20,14 +21,11 @@ export async function listProducts() {
     LEFT JOIN channels c ON c.id = ci.channel_id
     GROUP BY p.id
     ORDER BY p.id
-  `);
-
-  return result.rows;
+  `.execute(db).then((r) => r.rows);
 }
 
 export async function getProductById(id: number) {
-  const result = await pool.query(
-    `
+  const rows = await sql<Record<string, unknown>>`
     SELECT
       p.*,
       json_agg(
@@ -43,66 +41,65 @@ export async function getProductById(id: number) {
     FROM products p
     LEFT JOIN channel_inventory ci ON ci.product_id = p.id
     LEFT JOIN channels c ON c.id = ci.channel_id
-    WHERE p.id = $1
+    WHERE p.id = ${id}
     GROUP BY p.id
-    `,
-    [id],
-  );
+  `.execute(db).then((r) => r.rows);
 
-  if (result.rows.length === 0) {
+  if (rows.length === 0) {
     throw new AppError(404, 'Product not found');
   }
 
-  return result.rows[0];
+  return rows[0];
 }
 
 export async function bulkUpdatePrice(
   productIds: number[],
   adjustment: { type: 'percentage' | 'fixed'; value: number },
 ) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
+  return await db.transaction().execute(async (trx) => {
     // Create job
-    const jobResult = await client.query(
-      `INSERT INTO price_update_jobs (status, total_items) VALUES ('running', $1) RETURNING id`,
-      [productIds.length],
-    );
-    const jobId = jobResult.rows[0].id;
+    const job = await trx
+      .insertInto('price_update_jobs')
+      .values({ status: 'running', total_items: productIds.length })
+      .returning('id')
+      .executeTakeFirstOrThrow();
 
     let completedItems = 0;
     let failedItems = 0;
 
     for (const productId of productIds) {
       try {
-        const product = await client.query('SELECT price FROM products WHERE id = $1', [productId]);
-        if (product.rows.length === 0) {
+        const product = await trx
+          .selectFrom('products')
+          .select('price')
+          .where('id', '=', productId)
+          .executeTakeFirst();
+
+        if (!product) {
           failedItems++;
-          await client.query(
-            `INSERT INTO price_update_items (job_id, product_id, old_price, new_price, status)
-             VALUES ($1, $2, 0, 0, 'failed')`,
-            [jobId, productId],
-          );
+          await trx
+            .insertInto('price_update_items')
+            .values({ job_id: job.id, product_id: productId, old_price: 0, new_price: 0, status: 'failed' })
+            .execute();
           continue;
         }
 
-        const oldPrice = parseFloat(product.rows[0].price);
+        const oldPrice = parseFloat(product.price);
         const newPrice =
           adjustment.type === 'percentage'
-            ? oldPrice * (1 + adjustment.value / 100)
-            : oldPrice + adjustment.value;
+            ? Math.round(oldPrice * (1 + adjustment.value / 100) * 100) / 100
+            : Math.round((oldPrice + adjustment.value) * 100) / 100;
 
-        await client.query(
-          'UPDATE products SET price = $1, updated_at = NOW() WHERE id = $2',
-          [Math.round(newPrice * 100) / 100, productId],
-        );
+        await trx
+          .updateTable('products')
+          .set({ price: newPrice, updated_at: new Date() })
+          .where('id', '=', productId)
+          .execute();
 
-        await client.query(
-          `INSERT INTO price_update_items (job_id, product_id, old_price, new_price, status)
-           VALUES ($1, $2, $3, $4, 'applied')`,
-          [jobId, productId, oldPrice, Math.round(newPrice * 100) / 100],
-        );
+        await trx
+          .insertInto('price_update_items')
+          .values({ job_id: job.id, product_id: productId, old_price: oldPrice, new_price: newPrice, status: 'applied' })
+          .execute();
 
         completedItems++;
       } catch {
@@ -110,31 +107,33 @@ export async function bulkUpdatePrice(
       }
     }
 
-    await client.query(
-      `UPDATE price_update_jobs SET status = 'completed', completed_items = $1, failed_items = $2 WHERE id = $3`,
-      [completedItems, failedItems, jobId],
-    );
+    await trx
+      .updateTable('price_update_jobs')
+      .set({ status: 'completed', completed_items: completedItems, failed_items: failedItems })
+      .where('id', '=', job.id)
+      .execute();
 
-    await client.query('COMMIT');
-    return { jobId, completedItems, failedItems };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { jobId: job.id, completedItems, failedItems };
+  });
 }
 
 export async function getBulkPriceJob(jobId: number) {
-  const job = await pool.query('SELECT * FROM price_update_jobs WHERE id = $1', [jobId]);
-  if (job.rows.length === 0) {
+  const job = await db
+    .selectFrom('price_update_jobs')
+    .selectAll()
+    .where('id', '=', jobId)
+    .executeTakeFirst();
+
+  if (!job) {
     throw new AppError(404, 'Job not found');
   }
 
-  const items = await pool.query(
-    'SELECT * FROM price_update_items WHERE job_id = $1 ORDER BY id',
-    [jobId],
-  );
+  const items = await db
+    .selectFrom('price_update_items')
+    .selectAll()
+    .where('job_id', '=', jobId)
+    .orderBy('id')
+    .execute();
 
-  return { ...job.rows[0], items: items.rows };
+  return { ...job, items };
 }
