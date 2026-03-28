@@ -3,12 +3,29 @@ import cors from '@fastify/cors';
 import { config } from './config.js';
 import { pool } from './db.js';
 import { publisher, subscriber } from './redis.js';
+import { errorHandler } from './middleware/errors.js';
+import { productRoutes } from './routes/products.routes.js';
+import { salesRoutes } from './routes/sales.routes.js';
+import { reservationRoutes } from './routes/reservations.routes.js';
+import { expireStale } from './services/reservation.service.js';
 
 const app = Fastify({ logger: true });
+
+app.setErrorHandler(errorHandler);
 
 await app.register(cors, {
   origin: true,
 });
+
+// Add instance ID to all responses
+app.addHook('onSend', async (_request, reply) => {
+  reply.header('X-Instance-Id', config.instanceId);
+});
+
+// Register routes
+await app.register(productRoutes);
+await app.register(salesRoutes);
+await app.register(reservationRoutes);
 
 // Health check
 app.get('/api/health', async () => {
@@ -38,6 +55,18 @@ async function start() {
     // Verify DB
     await pool.query('SELECT 1');
     console.log(`[${config.instanceId}] PostgreSQL connected`);
+
+    // Background job: expire stale reservations every 60s
+    setInterval(async () => {
+      try {
+        const expired = await expireStale();
+        if (expired.length > 0) {
+          console.log(`[${config.instanceId}] Expired ${expired.length} reservations`);
+        }
+      } catch (err) {
+        console.error(`[${config.instanceId}] Reservation cleanup error:`, err);
+      }
+    }, 60_000);
 
     await app.listen({ port: config.port, host: config.host });
     console.log(`[${config.instanceId}] Server listening on port ${config.port}`);
