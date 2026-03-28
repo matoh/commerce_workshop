@@ -1,6 +1,7 @@
 import { sql } from 'kysely';
 import { db } from '../db/index.js';
 import { AppError } from '../utils/errors.js';
+import { broadcast } from '../utils/broadcast.js';
 
 // Atomic decrement — uses WHERE clause to prevent overselling
 export async function sell(productId: number, channelId: number, quantity: number) {
@@ -36,7 +37,7 @@ export async function sell(productId: number, channelId: number, quantity: numbe
       .executeTakeFirstOrThrow();
 
     // Record the sale
-    return await trx
+    const sale = await trx
       .insertInto('sales')
       .values({
         product_id: productId,
@@ -46,6 +47,9 @@ export async function sell(productId: number, channelId: number, quantity: numbe
       })
       .returningAll()
       .executeTakeFirstOrThrow();
+
+    await broadcast('invalidate', { entity: 'products', productId });
+    return sale;
   });
 }
 
@@ -105,7 +109,7 @@ export async function sellOptimistic(productId: number, channelId: number, quant
       .where('channel_id', '=', channelId)
       .execute();
 
-    return await trx
+    const sale = await trx
       .insertInto('sales')
       .values({
         product_id: productId,
@@ -115,5 +119,8 @@ export async function sellOptimistic(productId: number, channelId: number, quant
       })
       .returningAll()
       .executeTakeFirstOrThrow();
+
+    await broadcast('invalidate', { entity: 'products', productId });
+    return sale;
   });
 }

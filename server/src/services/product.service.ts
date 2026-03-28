@@ -1,6 +1,7 @@
 import { sql } from 'kysely';
 import { db } from '../db/index.js';
 import { AppError } from '../utils/errors.js';
+import { broadcast } from '../utils/broadcast.js';
 
 export async function listProducts() {
   return await sql<Record<string, unknown>>`
@@ -113,6 +114,7 @@ export async function bulkUpdatePrice(
       .where('id', '=', job.id)
       .execute();
 
+    await broadcast('invalidate', { entity: 'products' });
     return { jobId: job.id, completedItems, failedItems };
   });
 }

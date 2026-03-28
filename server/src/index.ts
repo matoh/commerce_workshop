@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { sql } from 'kysely';
 import { config } from './config.js';
-import { db } from './db/index.js';
+import { db, pool } from './db/index.js';
 import { publisher, subscriber } from './redis.js';
 import { errorHandler } from './middleware/errors.js';
 import routes from './routes/index.js';
@@ -34,6 +34,10 @@ app.get('/api/health', async () => {
     instanceId: config.instanceId,
     timestamp: result.rows[0].now,
     redis: redisOk,
+    connections: {
+      db: pool.totalCount,
+      dbIdle: pool.idleCount,
+    },
   };
 });
 

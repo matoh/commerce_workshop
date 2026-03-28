@@ -1,5 +1,6 @@
 import { db } from '../db/index.js';
 import { AppError } from '../utils/errors.js';
+import { broadcast } from '../utils/broadcast.js';
 
 const RESERVATION_TTL_MINUTES = 15;
 
@@ -34,7 +35,7 @@ export async function reserve(productId: number, channelId: number, quantity: nu
     // Create reservation with TTL
     const expiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000);
 
-    return await trx
+    const reservation = await trx
       .insertInto('reservations')
       .values({
         product_id: productId,
@@ -44,6 +45,9 @@ export async function reserve(productId: number, channelId: number, quantity: nu
       })
       .returningAll()
       .executeTakeFirstOrThrow();
+
+    await broadcast('invalidate', { entity: 'products', productId });
+    return reservation;
   });
 }
 
@@ -91,7 +95,7 @@ export async function complete(reservationId: number) {
       .where('id', '=', reservation.product_id)
       .executeTakeFirstOrThrow();
 
-    return await trx
+    const sale = await trx
       .insertInto('sales')
       .values({
         product_id: reservation.product_id,
@@ -101,6 +105,9 @@ export async function complete(reservationId: number) {
       })
       .returningAll()
       .executeTakeFirstOrThrow();
+
+    await broadcast('invalidate', { entity: 'products', productId: reservation.product_id });
+    return sale;
   });
 }
 
@@ -125,6 +132,10 @@ export async function expireStale() {
         .where('product_id', '=', reservation.product_id)
         .where('channel_id', '=', reservation.channel_id)
         .execute();
+    }
+
+    if (expired.length > 0) {
+      await broadcast('invalidate', { entity: 'products' });
     }
 
     return expired;
