@@ -5,9 +5,7 @@ import { config } from './config.js';
 import { db } from './db/index.js';
 import { publisher, subscriber } from './redis.js';
 import { errorHandler } from './middleware/errors.js';
-import { productRoutes } from './routes/products.routes.js';
-import { salesRoutes } from './routes/sales.routes.js';
-import { reservationRoutes } from './routes/reservations.routes.js';
+import routes from './routes/index.js';
 import { expireStale } from './services/reservation.service.js';
 
 const app = Fastify({ logger: true });
@@ -24,9 +22,7 @@ app.addHook('onSend', async (_request, reply) => {
 });
 
 // Register routes
-await app.register(productRoutes);
-await app.register(salesRoutes);
-await app.register(reservationRoutes);
+await app.register(routes);
 
 // Health check
 app.get('/api/health', async () => {
