@@ -6,8 +6,9 @@ export function errorHandler(
   _request: FastifyRequest,
   reply: FastifyReply,
 ) {
-  if (error instanceof AppError) {
-    return reply.status(error.statusCode).send({
+  if (error instanceof AppError || error.name === 'AppError') {
+    const statusCode = (error as AppError).statusCode || 500;
+    return reply.status(statusCode).send({
       error: error.message,
     });
   }

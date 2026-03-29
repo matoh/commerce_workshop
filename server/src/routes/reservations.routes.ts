@@ -17,9 +17,22 @@ const completeHandler = async (
   return reservationService.complete(reservationId);
 };
 
+const cancelHandler = async (
+  request: FastifyRequest<{ Params: { id: string } }>,
+) => {
+  const reservationId = parseInt(request.params.id, 10);
+  return reservationService.cancel(reservationId);
+};
+
+const listActiveHandler = async () => {
+  return reservationService.listActive();
+};
+
 const reservationRoutes: FastifyPluginAsync = async (fastify) => {
+  fastify.get('/reservations', listActiveHandler);
   fastify.post('/products/:id/reserve', { schema: { body: reserveInputSchema } }, reserveHandler);
   fastify.post('/reservations/:id/complete', completeHandler);
+  fastify.post('/reservations/:id/cancel', cancelHandler);
 };
 
 export default reservationRoutes;

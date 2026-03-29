@@ -4,6 +4,15 @@ import { broadcast } from '../utils/broadcast.js';
 
 const RESERVATION_TTL_MINUTES = 15;
 
+export async function listActive() {
+  return db
+    .selectFrom('reservations')
+    .selectAll()
+    .where('status', '=', 'held')
+    .where('expires_at', '>', new Date())
+    .execute();
+}
+
 export async function reserve(productId: number, channelId: number, quantity: number = 1) {
   return await db.transaction().execute(async (trx) => {
     // Check available stock
@@ -47,6 +56,35 @@ export async function reserve(productId: number, channelId: number, quantity: nu
       .executeTakeFirstOrThrow();
 
     await broadcast('invalidate', { entity: 'products', productId });
+    return reservation;
+  });
+}
+
+export async function cancel(reservationId: number) {
+  return await db.transaction().execute(async (trx) => {
+    const reservation = await trx
+      .updateTable('reservations')
+      .set({ status: 'expired' })
+      .where('id', '=', reservationId)
+      .where('status', '=', 'held')
+      .returningAll()
+      .executeTakeFirst();
+
+    if (!reservation) {
+      throw new AppError(404, 'Reservation not found or already cancelled');
+    }
+
+    // Release reserved stock back
+    await trx
+      .updateTable('channel_inventory')
+      .set((eb) => ({
+        reserved_stock: eb('reserved_stock', '-', reservation.quantity),
+      }))
+      .where('product_id', '=', reservation.product_id)
+      .where('channel_id', '=', reservation.channel_id)
+      .execute();
+
+    await broadcast('invalidate', { entity: 'products', productId: reservation.product_id });
     return reservation;
   });
 }

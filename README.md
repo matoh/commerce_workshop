@@ -42,3 +42,12 @@ docker compose exec api-1 npm run seed
 - Username: **commerce**
 - Password: **commerce**
 - Database: **commerce**
+
+## Key Concepts
+
+- Multi-channel inventory management
+- Concurrent sale handling (pessimistic vs optimistic locking)
+- Cart reservations with TTL
+- Bulk price updates with saga pattern
+- Real-time sync via SSE + Redis Pub/Sub
+- Multi-instance architecture
