@@ -1,45 +1,11 @@
-import Fastify from 'fastify';
-import cors from '@fastify/cors';
 import { sql } from 'kysely';
 import { config } from './config.js';
-import { db, pool } from './db/index.js';
+import { db } from './db/index.js';
 import { publisher, subscriber } from './redis.js';
-import { errorHandler } from './middleware/errors.js';
-import routes from './routes/index.js';
 import { expireStale } from './services/reservation.service.js';
+import { buildApp } from './app.js';
 
-const app = Fastify({ logger: true });
-
-app.setErrorHandler(errorHandler);
-
-await app.register(cors, {
-  origin: true,
-});
-
-// Add instance ID to all responses
-app.addHook('onSend', async (_request, reply) => {
-  reply.header('X-Instance-Id', config.instanceId);
-});
-
-// Register routes
-await app.register(routes);
-
-// Health check
-app.get('/api/health', async () => {
-  const result = await sql<{ now: string }>`SELECT NOW() AS now`.execute(db);
-  const redisOk = publisher.status === 'ready' ? 'connected' : publisher.status;
-
-  return {
-    status: 'ok',
-    instanceId: config.instanceId,
-    timestamp: result.rows[0].now,
-    redis: redisOk,
-    connections: {
-      db: pool.totalCount,
-      dbIdle: pool.idleCount,
-    },
-  };
-});
+const app = await buildApp();
 
 // Startup
 async function start() {

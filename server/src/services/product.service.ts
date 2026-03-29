@@ -57,6 +57,20 @@ export async function bulkUpdatePrice(
   productIds: number[],
   adjustment: { type: 'percentage' | 'fixed'; value: number },
 ) {
+  // Validate all product IDs exist before starting
+  const existing = await db
+    .selectFrom('products')
+    .select('id')
+    .where('id', 'in', productIds)
+    .execute();
+
+  const existingIds = new Set(existing.map((p) => p.id));
+  const invalid = productIds.filter((id) => !existingIds.has(id));
+
+  if (invalid.length > 0) {
+    throw new AppError(400, `Products not found: ${invalid.join(', ')}`);
+  }
+
   return await db.transaction().execute(async (trx) => {
     // Create job
     const job = await trx
